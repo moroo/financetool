@@ -14,11 +14,40 @@ import codecs
 import csv
 import os
 import time
+import json
+import datetime
 import argparse
 
 requestcount = 0
 
 def dataparse(data,args):
+    fp=io.StringIO(data)
+    pat=re.compile('window.__PRELOADED_STATE__ = ')
+    for line in fp:
+        t=pat.search(line)
+        if t:
+            ep=t.end()
+            print(t.end())
+            break
+    jdata=line[ep:]
+    j=json.loads(jdata)
+#print(j['mainStocksHistory']['history']["histories"])
+    sdata=[]
+    for datedata in j['mainStocksHistory']['history']["histories"]:
+        if args.verbose > 3:
+            print(datedata)
+        dt = datetime.datetime.fromisoformat(datedata['baseDateIso'])
+        vl = [ dt.year, dt.month, dt.day ]
+        for k in ['openPrice','highPrice','lowPrice','closePrice']:
+            vl.append(float(datedata[k].replace(",","")))
+        vl.append(int(datedata['volume'].replace(",","")))
+        vl.append(float(datedata['adjustedClosePrice'].replace(",","")))
+        sdata.append(vl)
+    if args.verbose > 3:
+        print(sdata)
+    return sdata
+
+def dataparseold(data,args):
     sdata=[]
     vdata=data.split("\n")
     divkey="stocksHistoryPageing"
@@ -59,6 +88,8 @@ def getpricedata(code,market,sy,sm,sd,ey,em,ed,p,args):
         time.sleep(60*60*24)
         requestcount = 0
     sdata=dataparse(data,args)
+    if args.verbose > 1:
+        print("No data %s\n",code)
     return sdata
    
 def send(code,market,sy,sm,sd,ey,em,ed,p,args):
@@ -73,7 +104,7 @@ def send(code,market,sy,sm,sd,ey,em,ed,p,args):
         print("Request count %d" % requestcount)
         return -1
     data = response.read().decode('utf-8')
-    if args.verbose > 3:
+    if args.verbose > 5:
         print(data)
     requestcount += 1
     return data
