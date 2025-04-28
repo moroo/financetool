@@ -1,0 +1,60 @@
+日本の株式の年初来最高値が下記のリンク先にあります。
+https://finance.yahoo.co.jp/stocks/ranking/yearToDateHigh?market=all&term=daily
+このページには、最大50件が表示され、51件目以降は
+https://finance.yahoo.co.jp/stocks/ranking/yearToDateHigh?market=all&term=daily&page=2
+と、'page=2'とページ指定されたURLに記載されていく形式です。
+この中から、
+名称, コード, 取引値, 前営業日までの年初来高値, 前営業日までの年初来高値の日付, 高値
+を抽出し、csvファイルを作成してください。
+今回の1ページ目のソースは、コード作成のサンプルとしてyahoohigh.html という名前でアップロードします。
+作成するコードは、finance.yahoo.co.jpのページから取得し、全件取得してください。
+ソース中、関連する部分を抜き出して下記に示します。
+
+<div id="item" class="RankingTable__2eJX">
+<div class="Card__1Idt StocksContents__card__3Wzz">
+<thead>
+<tr>
+<th scope="col" class="RankingTable__head__2mLL">順位</th>
+<th scope="col" class="RankingTable__head__2mLL">名称・コード・市場</th>
+<th scope="col" class="RankingTable__head__2mLL">取引値</th>
+<th scope="col" class="RankingTable__head__2mLL">前営業日までの年初来高値</th>
+<th scope="col" class="RankingTable__head__2mLL">高値</th>
+</tr>
+</thead>
+<tbody>
+<tr class="RankingTable__row__1Gwp">
+<td class="RankingTable__detail__P452">
+<a href="https://finance.yahoo.co.jp/quote/1401.T" data-cl-params="_cl_link:name;_cl_position:0">(株)エムビーエス</a>
+<ul class="RankingTable__supplements__15Cu">
+ <li class="RankingTable__supplement__vv_m">1401</li>
+</ul>
+<span class="StyledNumber__value__3rXW">814</span>
+<span class="StyledNumber__value__3rXW">800</span>
+class="StyledNumber__value__3rXW">2025/04/25</span>
+<span class="StyledNumber__value__3rXW">814</span>
+
+この部分は、名称、証券コードが記載されています。この例では、
+名称：(株)エムビーエス
+証券コード：1401
+です。
+<td class="RankingTable__detail__P452">
+<a href="https://finance.yahoo.co.jp/quote/1401.T" data-cl-params="_cl_link:name;_cl_position:0">(株)エムビーエス</a>
+ <ul class="RankingTable__supplements__15Cu">
+ <li class="RankingTable__supplement__vv_m">1401</li>
+</ul>
+
+この部分は、取引値(814)が記載されています。
+<span class="StyledNumber__value__3rXW">814</span>
+
+この部分は、前営業日までの年初来高値(800)とその日付(2025/04/25)が記述されています。
+<span class="StyledNumber__value__3rXW">800</span>
+class="StyledNumber__value__3rXW">2025/04/25</span>
+
+この部分は、最高値が記述されています。
+<span class="StyledNumber__value__3rXW">814</span>
+
+このページを起点として、年初来最高値の株式情報を全て取得し、CSVの表を作成し、現在のディレクトリに年月日.csv、本日であるなら
+20250428.csv
+として保存するpythone3スクリプトを作成しなさい。
+
+OSはLinuxとします。

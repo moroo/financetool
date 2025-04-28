@@ -1,82 +1,100 @@
 import csv
 import datetime
 import time
+import random
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from bs4 import BeautifulSoup
+from selenium.common.exceptions import WebDriverException
 
-# 出力ファイル名 (今日の日付)
-today = datetime.datetime.now().strftime('%Y%m%d')
-output_file = f"{today}.csv"
+def setup_driver():
+    chrome_options = Options()
+    chrome_options.add_argument('--headless')
+    chrome_options.add_argument('--no-sandbox')
+    chrome_options.add_argument('--disable-dev-shm-usage')
+    chrome_options.add_argument('--disable-blink-features=AutomationControlled')
+    # User-Agent偽装
+    chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
+    return webdriver.Chrome(options=chrome_options)
 
-# Yahooファイナンス 年初来高値ランキングページ
-base_url = "https://finance.yahoo.co.jp/stocks/ranking/yearToDateHigh?market=all&term=daily"
+def fetch_page(driver, url, retries=3):
+    for attempt in range(retries):
+        try:
+            driver.get(url)
+            time.sleep(random.uniform(1.5, 3.0))  # 適度なsleepでBAN回避
+            return driver.page_source
+        except WebDriverException as e:
+            print(f"ページ取得失敗 (試行{attempt+1}/{retries}): {e}")
+            time.sleep(2)
+    print(f"ページ取得失敗: {url}")
+    return None
 
-# Chromeドライバー設定
-options = Options()
-options.add_argument('--headless')
-options.add_argument('--no-sandbox')
-options.add_argument('--disable-dev-shm-usage')
-
-# ドライバー起動
-driver = webdriver.Chrome(options=options)
-
-# データ格納
-all_data = []
-
-page = 1
-
-while True:
-    # URL設定
-    if page == 1:
-        url = base_url
-    else:
-        url = f"{base_url}&page={page}"
-    
-    print(f"ページ {page} を取得中...")
-
-    driver.get(url)
-    time.sleep(2)
-
-    soup = BeautifulSoup(driver.page_source, 'html.parser')
-
+def parse_stock_data(page_source):
+    soup = BeautifulSoup(page_source, 'html.parser')
     rows = soup.select('div#item tr.RankingTable__row__1Gwp')
-
-    if not rows:
-        print(f"ページ {page} にデータがありません。終了します。")
-        break
+    stock_data = []
 
     for row in rows:
         try:
             name_tag = row.select_one('td.RankingTable__detail__P452 a')
-            name = name_tag.text.strip()
-            code = row.select_one('ul.RankingTable__supplements__15Cu li').text.strip()
+            name = name_tag.text.strip() if name_tag else "N/A"
+            code_tag = row.select_one('ul.RankingTable__supplements__15Cu li')
+            code = code_tag.text.strip() if code_tag else "N/A"
 
-            # 取引値、前営業日までの高値、前営業日までの高値日付、高値
             values = row.select('td.RankingTable__detail__P452 span.StyledNumber__value__3rXW')
+            trading_price = values[0].text.strip().replace(',', '') if len(values) > 0 else "N/A"
+            ytd_high_price = values[1].text.strip().replace(',', '') if len(values) > 1 else "N/A"
+            ytd_high_date = values[2].text.strip() if len(values) > 2 else "N/A"
+            high_price = values[3].text.strip().replace(',', '') if len(values) > 3 else "N/A"
 
-            # 数値からカンマを除去
-            trading_value = values[0].text.strip().replace(',', '')
-            previous_high_value = values[1].text.strip().replace(',', '')
-            previous_high_date = values[2].text.strip()
-            high_value = values[3].text.strip().replace(',', '')
-
-            all_data.append([name, code, trading_value, previous_high_value, previous_high_date, high_value])
+            stock_data.append([name, code, trading_price, ytd_high_price, ytd_high_date, high_price])
 
         except Exception as e:
-            print(f"エラー行スキップ: {e}")
+            print(f"データ抽出エラー: {e}")
             continue
 
-    page += 1
+    return stock_data
 
-driver.quit()
+def save_to_csv(data, filename):
+    try:
+        with open(filename, 'w', newline='', encoding='utf-8-sig') as file:
+            writer = csv.writer(file)
+            writer.writerow(["名称", "コード", "取引値", "前営業日までの年初来高値", "前営業日までの年初来高値の日付", "高値"])
+            writer.writerows(data)
+        print(f"CSVファイル '{filename}' に保存しました。")
+    except Exception as e:
+        print(f"CSV保存エラー: {e}")
 
-# CSVファイル出力
-with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
-    writer = csv.writer(csvfile)
-    writer.writerow(['名称', 'コード', '取引値', '前営業日までの年初来高値', '前営業日までの年初来高値の日付', '高値'])
-    writer.writerows(all_data)
+def main():
+    driver = setup_driver()
+    base_url = "https://finance.yahoo.co.jp/stocks/ranking/yearToDateHigh?market=all&term=daily"
+    all_stock_data = []
+    page = 1
 
-print(f"CSVファイル '{output_file}' を作成しました。")
+    try:
+        while True:
+            url = base_url if page == 1 else f"{base_url}&page={page}"
+            print(f"ページ {page} を取得中...")
 
+            page_source = fetch_page(driver, url)
+            if not page_source:
+                break
+
+            stock_data = parse_stock_data(page_source)
+            if not stock_data:
+                print("データが見つかりません。終了します。")
+                break
+
+            all_stock_data.extend(stock_data)
+            page += 1
+
+    finally:
+        driver.quit()
+
+    today = datetime.datetime.now().strftime("%Y%m%d")
+    filename = f"{today}.csv"
+    save_to_csv(all_stock_data, filename)
+
+if __name__ == "__main__":
+    main()
