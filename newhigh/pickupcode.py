@@ -77,3 +77,6 @@ def main():
     if args.output:
         df_out = pd.DataFrame(result)
         df_out.to_csv
+
+if __name__ == '__main__':
+    main()
