@@ -47,7 +47,6 @@ from selenium.webdriver.firefox.service import Service as FirefoxService
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.chrome.options import Options as ChromeOptions
-from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from bs4 import BeautifulSoup
 from selenium.common.exceptions import WebDriverException
@@ -57,15 +56,10 @@ def setup_driver():
     Chromeブラウザをヘッドレス（画面を表示せずに）で起動する関数。
     User-Agentを偽装して、bot検知を回避します。
     """
-    """
-    1) Firefox(snap) + geckodriver(snap) を優先
-    2) 失敗時は Chromium(snap) + chromedriver(apt) にフォールバック
-    """
-    # ---- Firefox 優先 ----
+    # 1) Firefox(snap) + geckodriver(snap) を優先
     try:
         os.environ.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-
-        ff_bin = "/snap/firefox/current/usr/lib/firefox/firefox"
+        ff_bin = "/snap/firefox/current/usr/lib/firefox/firefox"  # snap の実体
         base = Path.home() / "snap/firefox/common/selenium-profiles"
         base.mkdir(parents=True, exist_ok=True)
         prof = tempfile.mkdtemp(prefix="ff-prof-", dir=str(base))
@@ -73,8 +67,7 @@ def setup_driver():
 
         ff_opts = FirefoxOptions()
         ff_opts.binary_location = ff_bin
-        # ヘッドレス運用するなら下行を有効化
-        # ff_opts.add_argument("-headless")
+        ff_opts.add_argument("-headless")   # GUI なし想定なので有効化
         ff_opts.add_argument("-profile")
         ff_opts.add_argument(prof)
 
@@ -82,19 +75,30 @@ def setup_driver():
             service=FirefoxService("/snap/bin/geckodriver"),
             options=ff_opts
         )
+    except Exception as e:
+        print(f"[setup_driver] Firefox failed: {e}")
 
-    except Exception:
-        # ---- Chromium フォールバック ----
-        ch_opts = ChromeOptions()
-        ch_opts.binary_location = "/snap/bin/chromium"
-        ch_opts.add_argument("--no-sandbox")
-        ch_opts.add_argument("--disable-dev-shm-usage")
-        # ch_opts.add_argument("--headless=new")
+    # 2) 失敗時は Chromium(snap) + chromedriver(apt) にフォールバック
+    ch_opts = ChromeOptions()
+    # snap の実体パス（wrapperだと挙動が不安定なことがある）
+    ch_real = "/snap/chromium/current/usr/lib/chromium-browser/chromium"
+    ch_opts.binary_location = ch_real if os.path.exists(ch_real) else "/snap/bin/chromium"
+    ch_opts.add_argument("--no-sandbox")
+    ch_opts.add_argument("--disable-dev-shm-usage")
+    ch_opts.add_argument("--remote-debugging-port=0")
+    # 毎回ユニークな user-data-dir を snap 配下に用意して競合回避
+    ud_base = Path.home() / "snap/chromium/common/selenium-profiles"
+    ud_base.mkdir(parents=True, exist_ok=True)
+    tmp_ud = tempfile.mkdtemp(prefix="profile-", dir=str(ud_base))
+    atexit.register(lambda: shutil.rmtree(tmp_ud, ignore_errors=True))
+    ch_opts.add_argument(f"--user-data-dir={tmp_ud}")
+    # 必要ならヘッドレス:
+    # ch_opts.add_argument("--headless=new")
 
-        return webdriver.Chrome(
-            service=ChromeService("/usr/bin/chromedriver"),
-            options=ch_opts
-        )
+    return webdriver.Chrome(
+        service=ChromeService("/usr/bin/chromedriver"),
+        options=ch_opts
+    )
     chrome_options = Options()
     chrome_options.add_argument('--headless')  # 画面を表示しないモード
     chrome_options.add_argument('--no-sandbox')  # セキュリティサンドボックスを無効化
