@@ -1,220 +1,259 @@
+# chatgpt.py
 """
-【スクリプト概要】
+【概要】
+Yahoo!ファイナンス「年初来高値ランキング」から
+名称・コード・取引値・年初来高値・日付・高値 を取得し、CSV保存します。
+Selenium（Firefox優先→Chromiumフォールバック）で動的描画に対応。
 
-このPythonスクリプトは、Yahooファイナンスの年初来高値ランキングページから
-株式データ（名称、コード、取引値、前営業日までの年初来高値、年初来高値の日付、高値）を
-自動的に取得し、CSVファイルとして保存します。
-
-複数ページに渡るランキングも自動巡回して取得し、
-ネットワークエラーなどにもリトライ対応します。
-
-データ取得には、ページがJavaScriptで生成されるため、
-通常のrequestsではなく、Seleniumでブラウザをエミュレートしています。
-
-【使用ライブラリの選定理由】
-
-- Selenium:
-    -> YahooファイナンスのページはJavaScriptで描画されるため。
-       requestsでは動的に生成されるデータが取得できないため、実際にブラウザ操作を模倣できるSeleniumを採用。
-- BeautifulSoup:
-    -> ページ内のHTML構造を解析し、特定のデータ要素を簡単に抽出できるため。
-- pandas:
-    -> 本スクリプトでは使用していないが、将来的にデータ加工や集計をする場合には非常に便利なため、検討対象に。
-       ただし今回は、単純なデータ保存だけのため、軽量なcsvモジュールを採用。
-
-【他に検討したが使用しなかったライブラリ】
-
-- requests単独:
-    -> JavaScript描画後のデータを取得できないため却下。
-- Scrapy:
-    -> 大規模スクレイピング向けのフレームワークだが、今回は単純なページ巡回のみなのでオーバースペックと判断。
-- Playwright:
-    -> 次世代ブラウザ自動化ツールだが、Seleniumが十分安定しているため今回は採用せず。
-
-【注意点】
-
-- このスクリプトはGoogle Chromeとchromedriverがインストールされている必要があります。
+【前提（Ubuntu 24.04 / venv不可環境向け）】
+- selenium は apt の python3-selenium を使用
+- Firefox/Chromium は snap、ドライバはそれぞれ下記前提
+  - geckodriver: /snap/bin/geckodriver
+  - chromedriver: /usr/bin/chromedriver
 """
 
 import csv
 import datetime
 import time
 import random
-from selenium import webdriver
-import os, tempfile, atexit, shutil
+import os
+import tempfile
+import atexit
+import shutil
 from pathlib import Path
+from dataclasses import dataclass
+from typing import List, Optional
+
+from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.common.exceptions import WebDriverException, TimeoutException
+from selenium.webdriver.common.by import By
 from selenium.webdriver.firefox.service import Service as FirefoxService
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.chrome.options import Options as ChromeOptions
-from selenium.webdriver.common.by import By
-from bs4 import BeautifulSoup
-from selenium.common.exceptions import WebDriverException
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
-def setup_driver():
-    """
-    Chromeブラウザをヘッドレス（画面を表示せずに）で起動する関数。
-    User-Agentを偽装して、bot検知を回避します。
-    """
-    # 1) Firefox(snap) + geckodriver(snap) を優先
-    try:
-        os.environ.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-        ff_bin = "/snap/firefox/current/usr/lib/firefox/firefox"  # snap の実体
-        base = Path.home() / "snap/firefox/common/selenium-profiles"
-        base.mkdir(parents=True, exist_ok=True)
-        prof = tempfile.mkdtemp(prefix="ff-prof-", dir=str(base))
-        atexit.register(lambda: shutil.rmtree(prof, ignore_errors=True))
 
-        ff_opts = FirefoxOptions()
-        ff_opts.binary_location = ff_bin
-        ff_opts.add_argument("-headless")   # GUI なし想定なので有効化
-        ff_opts.add_argument("-profile")
-        ff_opts.add_argument(prof)
+# =========================
+# 設定
+# =========================
+BASE_URL = "https://finance.yahoo.co.jp/stocks/ranking/yearToDateHigh?market=all&term=daily"
+DEFAULT_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+)
+WAIT_SEC = 15          # 初回レンダリング待ち
+RETRY = 3              # ページ取得リトライ回数
+SLEEP_MIN, SLEEP_MAX = 0.8, 1.6  # アクセス間ランダム待機
 
-        return webdriver.Firefox(
-            service=FirefoxService("/snap/bin/geckodriver"),
-            options=ff_opts
-        )
-    except Exception as e:
-        print(f"[setup_driver] Firefox failed: {e}")
 
-    # 2) 失敗時は Chromium(snap) + chromedriver(apt) にフォールバック
-    ch_opts = ChromeOptions()
-    # snap の実体パス（wrapperだと挙動が不安定なことがある）
+# =========================
+# データ構造
+# =========================
+@dataclass
+class StockRow:
+    name: str
+    code: str
+    trading_price: str
+    ytd_high_price: str
+    ytd_high_date: str
+    high_price: str
+
+    def as_list(self) -> List[str]:
+        return [
+            self.name, self.code, self.trading_price,
+            self.ytd_high_price, self.ytd_high_date, self.high_price
+        ]
+
+
+# =========================
+# WebDriver 構築
+# =========================
+def _build_firefox(headless: bool = True) -> webdriver.Firefox:
+    os.environ.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+
+    ff_bin = "/snap/firefox/current/usr/lib/firefox/firefox"  # snap 実体
+    prof_base = Path.home() / "snap/firefox/common/selenium-profiles"
+    prof_base.mkdir(parents=True, exist_ok=True)
+    prof = tempfile.mkdtemp(prefix="ff-prof-", dir=str(prof_base))
+    atexit.register(lambda: shutil.rmtree(prof, ignore_errors=True))
+
+    opts = FirefoxOptions()
+    opts.binary_location = ff_bin
+    if headless:
+        opts.add_argument("-headless")
+    opts.add_argument("-profile")
+    opts.add_argument(prof)
+    # UA を上書き（Bot検知の軽減に寄与）
+    opts.set_preference("general.useragent.override", DEFAULT_UA)
+
+    drv = webdriver.Firefox(
+        service=FirefoxService("/snap/bin/geckodriver"),
+        options=opts
+    )
+    drv.set_page_load_timeout(WAIT_SEC)
+    return drv
+
+
+def _build_chromium(headless: bool = False) -> webdriver.Chrome:
+    # snap 実体パス（wrapper だと不安定なケースがある）
     ch_real = "/snap/chromium/current/usr/lib/chromium-browser/chromium"
-    ch_opts.binary_location = ch_real if os.path.exists(ch_real) else "/snap/bin/chromium"
-    ch_opts.add_argument("--no-sandbox")
-    ch_opts.add_argument("--disable-dev-shm-usage")
-    ch_opts.add_argument("--remote-debugging-port=0")
-    # 毎回ユニークな user-data-dir を snap 配下に用意して競合回避
+    bin_path = ch_real if os.path.exists(ch_real) else "/snap/bin/chromium"
+
     ud_base = Path.home() / "snap/chromium/common/selenium-profiles"
     ud_base.mkdir(parents=True, exist_ok=True)
     tmp_ud = tempfile.mkdtemp(prefix="profile-", dir=str(ud_base))
     atexit.register(lambda: shutil.rmtree(tmp_ud, ignore_errors=True))
-    ch_opts.add_argument(f"--user-data-dir={tmp_ud}")
-    # 必要ならヘッドレス:
-    # ch_opts.add_argument("--headless=new")
 
-    return webdriver.Chrome(
+    opts = ChromeOptions()
+    opts.binary_location = bin_path
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--remote-debugging-port=0")
+    opts.add_argument(f"--user-data-dir={tmp_ud}")
+    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+    opts.add_experimental_option("useAutomationExtension", False)
+    opts.add_argument(f"user-agent={DEFAULT_UA}")
+    if headless:
+        # Ubuntu 24.04 の Chromium は new ヘッドレス対応
+        opts.add_argument("--headless=new")
+
+    drv = webdriver.Chrome(
         service=ChromeService("/usr/bin/chromedriver"),
-        options=ch_opts
+        options=opts
     )
-    chrome_options = Options()
-    chrome_options.add_argument('--headless')  # 画面を表示しないモード
-    chrome_options.add_argument('--no-sandbox')  # セキュリティサンドボックスを無効化
-    chrome_options.add_argument('--disable-dev-shm-usage')  # メモリ共有無効化（Linux対策）
-    chrome_options.add_argument('--disable-blink-features=AutomationControlled')  # bot検知回避
-    chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')  # 人間のブラウザを装う
-    return webdriver.Chrome(options=chrome_options)
+    drv.set_page_load_timeout(WAIT_SEC)
+    return drv
 
-def fetch_page(driver, url, retries=3):
-    """
-    指定したURLのページを取得する。
-    取得に失敗した場合、最大retries回リトライする。
-    
-    Args:
-        driver: SeleniumのWebDriverインスタンス
-        url: 取得対象のURL
-        retries: 最大リトライ回数
 
-    Returns:
-        ページのHTMLソース（文字列）またはNone
+def setup_driver(prefer: str = "firefox", headless: bool = True):
     """
-    for attempt in range(retries):
+    Firefox（snap）を優先し、失敗時に Chromium（snap）へフォールバック。
+    """
+    builders = []
+    if prefer.lower().startswith("f"):
+        builders = [_build_firefox, _build_chromium]
+    else:
+        builders = [_build_chromium, _build_firefox]
+
+    last_err: Optional[Exception] = None
+    for builder in builders:
         try:
-            driver.get(url)  # 指定URLへアクセス
-            time.sleep(random.uniform(1.5, 3.0))  # 1.5〜3秒ランダムに待機
-            return driver.page_source  # ページソースを返す
-        except WebDriverException as e:
-            print(f"ページ取得失敗 (試行{attempt+1}/{retries}): {e}")
-            time.sleep(2)  # 2秒待機して再試行
-    print(f"ページ取得失敗: {url}")
+            drv = builder(headless=headless)
+            return drv
+        except Exception as e:
+            print(f"[setup_driver] {builder.__name__} failed: {e}")
+            last_err = e
+    raise RuntimeError(f"WebDriver setup failed: {last_err}")
+
+
+# =========================
+# 取得 & 解析
+# =========================
+def fetch_page(driver, url: str, retries: int = RETRY) -> Optional[str]:
+    """
+    指定URLを開き、主要要素が現れるまで待機して HTML を返す。
+    """
+    for attempt in range(1, retries + 1):
+        try:
+            driver.get(url)
+            WebDriverWait(driver, WAIT_SEC).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, 'div#item'))
+            )
+            time.sleep(random.uniform(SLEEP_MIN, SLEEP_MAX))
+            return driver.page_source
+        except (TimeoutException, WebDriverException) as e:
+            print(f"[fetch_page] fail {attempt}/{retries}: {e}")
+            time.sleep(min(2 ** attempt, 8))
+    print(f"[fetch_page] giving up: {url}")
     return None
 
-def parse_stock_data(page_source):
-    """
-    ページソースから株式データを抽出する関数。
-    
-    Args:
-        page_source: HTML文字列
 
-    Returns:
-        抽出した株式データリスト
+def _sel_first_text(node, selector: str, default: str = "N/A") -> str:
+    el = node.select_one(selector)
+    return el.text.strip() if el else default
+
+
+def parse_stock_data(page_source: str) -> List[StockRow]:
     """
-    soup = BeautifulSoup(page_source, 'html.parser')  # HTML解析
-    rows = soup.select('div#item tr.RankingTable__row__1Gwp')  # 株式リスト行を取得
-    stock_data = []
+    HTML からランキング行を抽出。クラス名末尾の揺れに強い CSS を使用。
+    """
+    soup = BeautifulSoup(page_source, "html.parser")
+    rows = soup.select('div#item tr[class*="RankingTable__row"]')
+    out: List[StockRow] = []
 
     for row in rows:
         try:
-            name_tag = row.select_one('td.RankingTable__detail__P452 a')  # 名称を取得
-            name = name_tag.text.strip() if name_tag else "N/A"  # テキスト取り出し
+            name = _sel_first_text(row, 'td[class*="RankingTable__detail"] a')
+            code = _sel_first_text(row, 'ul[class*="RankingTable__supplements"] li')
 
-            code_tag = row.select_one('ul.RankingTable__supplements__15Cu li')  # 証券コード取得
-            code = code_tag.text.strip() if code_tag else "N/A"
+            nums = row.select('td[class*="RankingTable__detail"] span[class*="StyledNumber__value"]')
+            def num_at(i, default="N/A"):
+                return nums[i].text.strip().replace(",", "") if len(nums) > i else default
 
-            values = row.select('td.RankingTable__detail__P452 span.StyledNumber__value__3rXW')  # 数値データ抽出
-            trading_price = values[0].text.strip().replace(',', '') if len(values) > 0 else "N/A"  # 取引値
-            ytd_high_price = values[1].text.strip().replace(',', '') if len(values) > 1 else "N/A"  # 年初来高値
-            ytd_high_date = values[2].text.strip() if len(values) > 2 else "N/A"  # 年初来高値日
-            high_price = values[3].text.strip().replace(',', '') if len(values) > 3 else "N/A"  # 高値
+            trading_price = num_at(0)
+            ytd_high_price = num_at(1)
+            ytd_high_date  = _sel_first_text(row, 'td[class*="RankingTable__detail"] span[class*="StyledNumber__date"]', "N/A") \
+                             if len(nums) <= 2 else num_at(2)  # 後方互換
+            high_price     = num_at(3)
 
-            stock_data.append([name, code, trading_price, ytd_high_price, ytd_high_date, high_price])  # データをリストへ追加
+            out.append(StockRow(
+                name=name, code=code, trading_price=trading_price,
+                ytd_high_price=ytd_high_price, ytd_high_date=ytd_high_date,
+                high_price=high_price
+            ))
         except Exception as e:
-            print(f"データ抽出エラー: {e}")  # 何か問題があればスキップ
+            print(f"[parse] row skipped: {e}")
             continue
+    return out
 
-    return stock_data
 
-def save_to_csv(data, filename):
-    """
-    データをCSVファイルに保存する関数。
-    
-    Args:
-        data: 保存するリスト形式のデータ
-        filename: 出力するファイル名
-    """
-    try:
-        with open(filename, 'w', newline='', encoding='utf-8-sig') as file:
-            writer = csv.writer(file)
-            writer.writerow(["名称", "コード", "取引値", "前営業日までの年初来高値", "前営業日までの年初来高値の日付", "高値"])  # ヘッダー行
-            writer.writerows(data)  # 本体データ
-        print(f"CSVファイル '{filename}' に保存しました。")
-    except Exception as e:
-        print(f"CSV保存エラー: {e}")
+# =========================
+# 保存
+# =========================
+def save_to_csv(rows: List[StockRow], out_path: Path):
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(["名称", "コード", "取引値", "前営業日までの年初来高値", "前営業日までの年初来高値の日付", "高値"])
+        for r in rows:
+            w.writerow(r.as_list())
+    print(f"[save] {out_path} ({len(rows)} rows)")
 
+
+# =========================
+# メイン
+# =========================
 def main():
-    """
-    スクリプトのメイン関数。
-    ページを巡回し、株式データをすべて取得してCSVに保存します。
-    """
-    driver = setup_driver()  # ブラウザ起動
-    base_url = "https://finance.yahoo.co.jp/stocks/ranking/yearToDateHigh?market=all&term=daily"
-    all_stock_data = []  # データをまとめるリスト
+    driver = setup_driver(prefer="firefox", headless=True)
+    all_rows: List[StockRow] = []
     page = 1
 
     try:
         while True:
-            url = base_url if page == 1 else f"{base_url}&page={page}"  # ページURLを組み立て
-            print(f"ページ {page} を取得中...")
-
-            page_source = fetch_page(driver, url)  # ページ取得
-            if not page_source:
-                break  # ページ取得失敗で終了
-
-            stock_data = parse_stock_data(page_source)  # データ抽出
-            if not stock_data:
-                print("データが見つかりません。終了します。")
-                break  # データが無ければ終了
-
-            all_stock_data.extend(stock_data)  # データを追加
-            page += 1  # 次のページへ
+            url = BASE_URL if page == 1 else f"{BASE_URL}&page={page}"
+            print(f"[crawl] page={page} -> {url}")
+            html = fetch_page(driver, url)
+            if not html:
+                break
+            rows = parse_stock_data(html)
+            if not rows:
+                print("[crawl] no rows; stop.")
+                break
+            all_rows.extend(rows)
+            page += 1
     finally:
-        driver.quit()  # ブラウザを必ず終了
+        try:
+            driver.quit()
+        except Exception:
+            pass
 
-    today = datetime.datetime.now().strftime("%Y%m%d")  # 今日の日付を取得
-    filename = f"{today}.csv"  # ファイル名作成
-    save_to_csv(all_stock_data, filename)  # CSV出力
+    today = datetime.datetime.now().strftime("%Y%m%d")
+    out = Path(f"{today}.csv")
+    save_to_csv(all_rows, out)
+
 
 if __name__ == "__main__":
     main()
